@@ -1,0 +1,27 @@
+{
+  "name": "xerver",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "test": "node --require ./tests/setup.js --test tests/cases/*.test.ts",
+    "lint": "biome check .",
+    "format": "biome format . --write",
+    "check": "biome check . --write",
+    "biome:ci": "biome ci"
+  },
+  "keywords": [],
+  "author": "denyzhirkov@gmail.com",
+  "license": "ISC",
+  "description": "A lightweight, decentralized mesh network library for Node.js. It allows you to create nodes that can discover each other, share capabilities (Actions), and execute remote functions across a distributed network transparently.",
+  "devDependencies": {
+    "@biomejs/biome": "2.3.6",
+    "@types/node": "^24.10.1",
+    "@types/uuid": "^10.0.0",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.9.3"
+  },
+  "dependencies": {
+    "@msgpack/msgpack": "^3.1.2",
+    "uuid": "^9.0.0"
+  }
+}
