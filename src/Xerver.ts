@@ -53,6 +53,7 @@ export class Xerver {
       nodes: [],
       maxConcurrency: Infinity, // Default: unbounded
       maxQueueSize: 5000, // Default queue limit
+      connectionRetryInterval: 5000, // Default: 5s
       ...config,
     };
     this.requestMonitor = config.onrequest;
@@ -276,14 +277,38 @@ export class Xerver {
   private connectToPeers() {
     if (this.config.nodes) {
       this.config.nodes.forEach((peer) => {
-        const socket = net.createConnection({
-          host: peer.address,
-          port: peer.port,
-        });
-        const connection = new Connection(socket);
-        this.setupConnection(connection);
+        this.connectToPeer(peer);
       });
     }
+  }
+
+  private connectToPeer(peer: { address: string; port: number }) {
+    if (!this.isRunning) return;
+
+    const socket = net.createConnection({
+      host: peer.address,
+      port: peer.port,
+    });
+
+    const connection = new Connection(socket);
+
+    // Silence initial connection errors; we rely on 'close' to retry
+    socket.on('error', () => { });
+
+    socket.on('close', () => {
+      // If node is still running and reconnection is enabled
+      if (this.isRunning && (this.config.connectionRetryInterval ?? 0) > 0) {
+        const retryDelay = this.config.connectionRetryInterval!;
+        // Only log if we had a successful handshake or if debug is on? 
+        // For now, console.log might be too noisy if target is down for long.
+        // Let's keep it minimal or use debug level if we had one.
+        // console.log(`[${this.config.name}] Connection to ${peer.address}:${peer.port} closed. Retrying in ${retryDelay}ms...`);
+
+        setTimeout(() => this.connectToPeer(peer), retryDelay);
+      }
+    });
+
+    this.setupConnection(connection);
   }
 
   private setupConnection(connection: Connection) {

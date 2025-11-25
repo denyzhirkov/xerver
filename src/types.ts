@@ -5,6 +5,7 @@ export interface XerverConfig {
   requestTimeout?: number;
   maxConcurrency?: number; // New configuration option
   maxQueueSize?: number; // Limit the size of the request queue
+  connectionRetryInterval?: number; // Time in ms to wait before reconnecting to a peer. Default: 5000
   onrequest?: RequestMonitorCallback;
 }
 
