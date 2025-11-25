@@ -32,6 +32,7 @@ export class Xerver {
       reject: (err: any) => void;
       createdAt: number;
       actionName: string;
+      peerId?: string; // Track which peer is handling this request
     }
   > = new Map();
 
@@ -246,6 +247,15 @@ export class Xerver {
       if (now - req.createdAt > timeout) {
         // Use original error message format to maintain compatibility
         req.reject(new Error(`Timeout calling action ${req.actionName}`));
+
+        // Decrease pending requests on peer
+        if (req.peerId) {
+          const peer = this.peers.get(req.peerId);
+          if (peer) {
+            peer.pendingRequests = Math.max(0, peer.pendingRequests - 1);
+          }
+        }
+
         this.pendingRequests.delete(id);
       }
     }
@@ -398,12 +408,19 @@ export class Xerver {
     }
 
     // 2. Forwarding (Mesh)
-    let targetPeer: Connection | undefined;
+    // Load Balancing: Least Connection
+    const candidates: Connection[] = [];
     for (const peer of this.peers.values()) {
       if (peer.remoteActions.includes(actionName)) {
-        targetPeer = peer;
-        break;
+        candidates.push(peer);
       }
+    }
+
+    let targetPeer: Connection | undefined;
+    if (candidates.length > 0) {
+      // Sort by pendingRequests (Ascending)
+      candidates.sort((a, b) => a.pendingRequests - b.pendingRequests);
+      targetPeer = candidates[0];
     }
 
     this.emitMonitorEvent({
@@ -416,6 +433,17 @@ export class Xerver {
     if (!targetPeer) {
       this.routeRequest(msg, connection);
     } else {
+      // Track forwarded request load?
+      // Note: For simple forwarding we don't typically count 'pendingRequests' on Connection
+      // because we are not the original requester waiting for response.
+      // However, if we want to load balance properly in mesh, we should probably track it.
+      // But currently pendingRequests is tied to 'this.pendingRequests' map which is for OUR requests.
+      // For now, we only load balance outgoing requests originating from here or simple forwarding.
+
+      // If we forward, we don't track response here (it goes via route table). 
+      // So we can't easily decrement count when response passes through. 
+      // True Least Connection in mesh requires gossip protocol.
+      // Current implementation: Least Connection for DIRECT neighbors.
       this.forwardRequest(msg, targetPeer, connection);
     }
   }
@@ -468,11 +496,19 @@ export class Xerver {
   private handleActionResponse(msg: XerverMessage<any>) {
     // 1. Check if we are the original requester
     if (this.pendingRequests.has(msg.id)) {
-      const { resolve, reject } = this.pendingRequests.get(msg.id)!;
+      const req = this.pendingRequests.get(msg.id)!;
       this.pendingRequests.delete(msg.id);
 
+      // Decrease load count for the peer that handled this
+      if (req.peerId) {
+        const peer = this.peers.get(req.peerId);
+        if (peer) {
+          peer.pendingRequests = Math.max(0, peer.pendingRequests - 1);
+        }
+      }
+
       if (msg.type === 'ERROR') {
-        reject(new Error(msg.payload.error));
+        req.reject(new Error(msg.payload.error));
       } else {
         let result = msg.payload.result;
         if (msg.serializer === 'msgpack') {
@@ -482,11 +518,11 @@ export class Xerver {
             const decoded: any = decode(buffer);
             result = decoded.result;
           } catch {
-            reject(new Error('Failed to decode msgpack response'));
+            req.reject(new Error('Failed to decode msgpack response'));
             return;
           }
         }
-        resolve(result);
+        req.resolve(result);
       }
       return;
     }
@@ -503,11 +539,27 @@ export class Xerver {
     return new Promise((resolve, reject) => {
       const id = uuid();
 
+      // Load Balancing: Least Connection
+      // 1. Find candidates
+      const candidates: Connection[] = [];
+      for (const peer of this.peers.values()) {
+        if (peer.remoteActions.includes(actionName)) {
+          candidates.push(peer);
+        }
+      }
+
+      let targetPeer: Connection | undefined;
+      if (candidates.length > 0) {
+        // 2. Sort by pendingRequests (Ascending)
+        candidates.sort((a, b) => a.pendingRequests - b.pendingRequests);
+        targetPeer = candidates[0];
+      }
+
       this.emitMonitorEvent({
         id: id,
         type: 'outgoing',
         action: actionName,
-        target: 'mesh_search',
+        target: targetPeer?.id || 'mesh_search',
       });
 
       // Optimized: No setTimeout here. Cleanup handled by cleanupStaleRequests
@@ -515,7 +567,8 @@ export class Xerver {
         resolve,
         reject,
         createdAt: Date.now(),
-        actionName
+        actionName,
+        peerId: targetPeer?.id || undefined // Store peer ID for load tracking
       });
 
       const msg: XerverMessage<ActionCallPayload> = {
@@ -527,15 +580,8 @@ export class Xerver {
         payload: { action: actionName, args },
       };
 
-      let targetPeer: Connection | undefined;
-      for (const peer of this.peers.values()) {
-        if (peer.remoteActions.includes(actionName)) {
-          targetPeer = peer;
-          break;
-        }
-      }
-
       if (targetPeer) {
+        targetPeer.pendingRequests++; // Increment load
         targetPeer.send(msg);
       } else {
         for (const peer of this.peers.values()) {

@@ -9,6 +9,7 @@ export class Connection extends EventEmitter {
   public id: string | null = null; // Remote Node ID (name)
   public isHandshakeComplete: boolean = false;
   public remoteActions: string[] = [];
+  public pendingRequests: number = 0; // Load Balancing: Active requests sent to this peer
 
   constructor(socket: net.Socket) {
     super();
