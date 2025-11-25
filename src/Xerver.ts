@@ -1,6 +1,7 @@
 import * as net from 'node:net';
 import { decode, encode } from '@msgpack/msgpack';
-import { v4 as uuidv4 } from 'uuid';
+import hyperid from 'hyperid';
+import { Queue } from './Queue';
 import { Connection } from './Connection';
 import type {
   ActionCallPayload,
@@ -15,31 +16,42 @@ import type {
   XerverMessage,
 } from './types';
 
+const uuid = hyperid();
+
 export class Xerver {
   readonly config: XerverConfig;
   readonly server: net.Server;
   readonly actions: Map<string, ActionDefinition> = new Map();
   readonly peers: Map<string, Connection> = new Map();
+
+  // Optimized: Store timestamp instead of individual timers
   readonly pendingRequests: Map<
     string,
     {
       resolve: (val: any) => void;
       reject: (err: any) => void;
-      timer: NodeJS.Timeout;
+      createdAt: number;
+      actionName: string;
     }
   > = new Map();
+
   private isRunning: boolean = false;
   private requestMonitor?: RequestMonitorCallback;
+  private cleanupTimer?: NodeJS.Timeout;
 
   // Concurrency Control
   private activeRequests: number = 0;
-  private requestQueue: Array<() => void> = [];
+  private requestQueue: Queue<{
+    resolve: () => void;
+    reject: (err: any) => void;
+  }> = new Queue();
 
   constructor(config: XerverConfig) {
     this.config = {
       requestTimeout: 10000,
       nodes: [],
       maxConcurrency: Infinity, // Default: unbounded
+      maxQueueSize: 5000, // Default queue limit
       ...config,
     };
     this.requestMonitor = config.onrequest;
@@ -102,6 +114,18 @@ export class Xerver {
     const maxConcurrency = this.config.maxConcurrency || Infinity;
 
     if (this.activeRequests >= maxConcurrency) {
+      // Check Queue Limit
+      if (this.requestQueue.size >= (this.config.maxQueueSize || 5000)) {
+        this.emitMonitorEvent({
+          id: requestId,
+          type: 'queued',
+          action: actionName,
+          sender: sender,
+          metadata: { reason: 'Queue full' }
+        });
+        throw new Error('Service Unavailable: Request queue full');
+      }
+
       this.emitMonitorEvent({
         id: requestId,
         type: 'queued',
@@ -109,8 +133,8 @@ export class Xerver {
         sender: sender,
       });
 
-      await new Promise<void>((resolve) => {
-        this.requestQueue.push(resolve);
+      await new Promise<void>((resolve, reject) => {
+        this.requestQueue.enqueue({ resolve, reject });
       });
     }
 
@@ -131,26 +155,35 @@ export class Xerver {
   }
 
   private processQueue() {
-    if (this.requestQueue.length > 0) {
-      const next = this.requestQueue.shift();
-      if (next) next();
+    if (this.requestQueue.size > 0) {
+      const next = this.requestQueue.dequeue();
+      if (next) {
+        // Optimization: Use setImmediate to allow I/O between queued tasks
+        setImmediate(next.resolve);
+      }
     }
   }
 
-  public start() {
-    if (this.isRunning) return;
-    this.server.listen(this.config.port, () => {
-      console.log(
-        `Xerver node [${this.config.name}] listening on port ${this.config.port}`,
-      );
-      this.isRunning = true;
-      this.connectToPeers();
+  public start(): Promise<void> {
+    if (this.isRunning) return Promise.resolve();
+    return new Promise((resolve) => {
+      this.server.listen(this.config.port, () => {
+        console.log(
+          `Xerver node [${this.config.name}] listening on port ${this.config.port}`,
+        );
+        this.isRunning = true;
+        this.startCleanupTimer();
+        this.connectToPeers();
+        resolve();
+      });
     });
   }
 
   public async stop() {
     if (!this.isRunning) return;
     console.log(`Stopping Xerver node [${this.config.name}]...`);
+
+    this.stopCleanupTimer();
 
     // 1. Close all peer connections
     for (const [, peer] of this.peers) {
@@ -160,14 +193,18 @@ export class Xerver {
 
     // 2. Clear pending requests
     for (const [, req] of this.pendingRequests) {
-      clearTimeout(req.timer);
       req.reject(new Error('Node stopping'));
     }
     this.pendingRequests.clear();
 
-    // 3. Clear queue
-    this.requestQueue = [];
+    // 3. Clear queue and reject pending queued items
+    // yocto-queue is iterable in newer versions, but safe way is dequeue loop
+    while (this.requestQueue.size > 0) {
+      const req = this.requestQueue.dequeue();
+      req?.reject(new Error('Node stopping'));
+    }
     this.activeRequests = 0;
+    this.routingTable.clear();
 
     // 4. Close server
     return new Promise<void>((resolve, reject) => {
@@ -182,6 +219,43 @@ export class Xerver {
         }
       });
     });
+  }
+
+  // --- Timeout Management ---
+
+  private startCleanupTimer() {
+    if (this.cleanupTimer) return;
+    // Run cleanup every 1s
+    this.cleanupTimer = setInterval(() => this.cleanupStaleRequests(), 1000);
+    this.cleanupTimer.unref(); // Don't keep process alive just for this
+  }
+
+  private stopCleanupTimer() {
+    if (this.cleanupTimer) {
+      clearInterval(this.cleanupTimer);
+      this.cleanupTimer = undefined;
+    }
+  }
+
+  private cleanupStaleRequests() {
+    const now = Date.now();
+    const timeout = this.config.requestTimeout || 10000;
+
+    // 1. Cleanup Pending Requests (Outgoing)
+    for (const [id, req] of this.pendingRequests) {
+      if (now - req.createdAt > timeout) {
+        // Use original error message format to maintain compatibility
+        req.reject(new Error(`Timeout calling action ${req.actionName}`));
+        this.pendingRequests.delete(id);
+      }
+    }
+
+    // 2. Cleanup Routing Table (Forwarding)
+    for (const [id, route] of this.routingTable) {
+      if (now - route.createdAt > timeout) {
+        this.routingTable.delete(id);
+      }
+    }
   }
 
   private handleIncomingConnection(socket: net.Socket) {
@@ -208,18 +282,18 @@ export class Xerver {
     );
     connection.on('close', () => {
       if (connection.id) {
-        // console.log(`Peer disconnected: ${connection.id}`); // Optional log
         this.peers.delete(connection.id);
       }
+      // Cleanup resources associated with this connection if necessary
     });
     connection.on('error', () => {
-      // console.error(`Connection error:`, err); // Optional log
+      // Socket errors are handled by close mostly, but good to have listener
     });
 
     // Send Handshake
     const handshakeMsg: XerverMessage<HandshakePayload> = {
       type: 'HANDSHAKE',
-      id: uuidv4(),
+      id: uuid(),
       serializer: 'json',
       sender: this.config.name,
       trace: [this.config.name],
@@ -347,19 +421,18 @@ export class Xerver {
   }
 
   // Map to store where a request came from: RequestID -> IncomingConnection
-  private routingTable: Map<string, Connection> = new Map();
+  // Optimized: Store creation time for cleanup
+  private routingTable: Map<string, { connection: Connection; createdAt: number }> = new Map();
 
   private routeRequest(
     msg: XerverMessage<ActionCallPayload>,
     incomingConnection: Connection,
   ) {
-    // Store route
-    this.routingTable.set(msg.id, incomingConnection);
-
-    // Cleanup routing table after timeout
-    setTimeout(() => {
-      this.routingTable.delete(msg.id);
-    }, this.config.requestTimeout);
+    // Store route with timestamp
+    this.routingTable.set(msg.id, {
+      connection: incomingConnection,
+      createdAt: Date.now()
+    });
 
     // Forward to all applicable peers
     const nextTrace = [...msg.trace, this.config.name];
@@ -380,11 +453,10 @@ export class Xerver {
     target: Connection,
     incoming: Connection,
   ) {
-    this.routingTable.set(msg.id, incoming);
-    // Cleanup
-    setTimeout(() => {
-      this.routingTable.delete(msg.id);
-    }, this.config.requestTimeout);
+    this.routingTable.set(msg.id, {
+      connection: incoming,
+      createdAt: Date.now()
+    });
 
     const forwardedMsg = {
       ...msg,
@@ -396,8 +468,7 @@ export class Xerver {
   private handleActionResponse(msg: XerverMessage<any>) {
     // 1. Check if we are the original requester
     if (this.pendingRequests.has(msg.id)) {
-      const { resolve, reject, timer } = this.pendingRequests.get(msg.id)!;
-      clearTimeout(timer);
+      const { resolve, reject } = this.pendingRequests.get(msg.id)!;
       this.pendingRequests.delete(msg.id);
 
       if (msg.type === 'ERROR') {
@@ -421,16 +492,16 @@ export class Xerver {
     }
 
     // 2. If not, check routing table to forward back
-    const sourceConnection = this.routingTable.get(msg.id);
-    if (sourceConnection) {
-      sourceConnection.send(msg);
+    const route = this.routingTable.get(msg.id);
+    if (route) {
+      route.connection.send(msg);
       this.routingTable.delete(msg.id); // Request complete
     }
   }
 
   private remoteCall(actionName: string, args: any): Promise<any> {
     return new Promise((resolve, reject) => {
-      const id = uuidv4();
+      const id = uuid();
 
       this.emitMonitorEvent({
         id: id,
@@ -439,12 +510,13 @@ export class Xerver {
         target: 'mesh_search',
       });
 
-      const timer = setTimeout(() => {
-        this.pendingRequests.delete(id);
-        reject(new Error(`Timeout calling action ${actionName}`));
-      }, this.config.requestTimeout);
-
-      this.pendingRequests.set(id, { resolve, reject, timer });
+      // Optimized: No setTimeout here. Cleanup handled by cleanupStaleRequests
+      this.pendingRequests.set(id, {
+        resolve,
+        reject,
+        createdAt: Date.now(),
+        actionName
+      });
 
       const msg: XerverMessage<ActionCallPayload> = {
         type: 'ACTION_CALL',

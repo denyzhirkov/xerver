@@ -4,6 +4,7 @@ export interface XerverConfig {
   nodes?: PeerAddress[];
   requestTimeout?: number;
   maxConcurrency?: number; // New configuration option
+  maxQueueSize?: number; // Limit the size of the request queue
   onrequest?: RequestMonitorCallback;
 }
 

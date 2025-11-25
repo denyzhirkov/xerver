@@ -22,6 +22,8 @@
   },
   "dependencies": {
     "@msgpack/msgpack": "^3.1.2",
-    "uuid": "^9.0.0"
+    "hyperid": "^3.3.0",
+    "uuid": "^9.0.0",
+    "yocto-queue": "^1.2.2"
   }
 }

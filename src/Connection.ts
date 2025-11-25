@@ -17,6 +17,7 @@ export class Connection extends EventEmitter {
   }
 
   private setupSocket() {
+    this.socket.setNoDelay(true); // Disable Nagle's algorithm for lower latency
     this.socket.on('data', (chunk) => {
       this.buffer = Buffer.concat([this.buffer, chunk]);
       this.processBuffer();
