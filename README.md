@@ -7,11 +7,13 @@ Designed for speed and reliability, Xerver is capable of handling **40k+ RPS** w
 ## Features
 
 *   **Mesh Networking:** Automatic request routing through connected peers.
+*   **Streaming Support:** Real-time data streaming via `AsyncGenerator` (Server-to-Client).
 *   **Zero-Config Discovery:** Nodes exchange capabilities via Handshake.
 *   **Smart Load Balancing:** Uses **Least Connection** strategy to distribute tasks evenly across workers.
+*   **Resilience:** Automatic reconnection with exponential backoff logic.
 *   **High Performance:** 
     *   **Zero-Copy Queue:** Custom O(1) Linked-List Queue implementation.
-    *   **Fast Serialization:** Protocol-agnostic, optimized for JSON and MsgPack.
+    *   **Fast Serialization:** Protocol-agnostic, optimized for JSON and MsgPack (supports binary streams).
     *   **Low Latency:** Nagle's algorithm disabled for instant RPC execution.
     *   **HyperID:** High-speed UUID generation (50x faster than standard UUIDs).
 *   **Cycle Detection:** Prevents infinite loops in the network graph.
@@ -73,17 +75,46 @@ setTimeout(async () => {
 
 ## Advanced Usage
 
-### Binary Data with MsgPack
-Use `msgpack` serializer for efficient binary transfer (e.g., buffers, images).
+### Data Streaming
+Transfer large datasets, real-time events, or binary files efficiently using async generators.
+
+**Server:**
+```typescript
+node.setAction('generateNumbers', async function* (max: number) {
+  for (let i = 0; i < max; i++) {
+    yield i; // Send chunk to client
+    await new Promise(r => setTimeout(r, 100));
+  }
+});
+```
+
+**Client:**
+```typescript
+for await (const num of client.callStream('generateNumbers', 10)) {
+  console.log('Received:', num);
+}
+```
+
+### Binary Streaming (High Performance)
+For files or large buffers, use `msgpack` serializer. Xerver automatically optimizes chunk serialization.
 
 ```typescript
-// Server
-node.setAction('processImage', (buffer: Buffer) => {
-  return { size: buffer.length, status: 'processed' };
+import * as fs from 'fs';
+
+// Server: Stream a large file
+node.setAction('downloadFile', async function* (path: string) {
+  const stream = fs.createReadStream(path, { highWaterMark: 64 * 1024 });
+  for await (const chunk of stream) {
+    yield chunk; // Yields Buffer
+  }
 }, { serializer: 'msgpack' });
 
 // Client
-const result = await node.callAction('processImage', fs.readFileSync('image.png'));
+const chunks = [];
+for await (const chunk of client.callStream('downloadFile', 'video.mp4')) {
+  chunks.push(chunk);
+}
+const file = Buffer.concat(chunks);
 ```
 
 ### Concurrency Limit
@@ -94,6 +125,18 @@ const node = new Xerver({
   name: 'heavy-worker',
   port: 3003,
   maxConcurrency: 5 // Only 5 actions running at once
+});
+```
+
+### Resilience & Auto-Reconnection
+Configure automatic reconnection behavior.
+
+```typescript
+const node = new Xerver({
+  name: 'resilient-node',
+  port: 3005,
+  nodes: [{ address: 'localhost', port: 3001 }],
+  connectionRetryInterval: 5000 // Retry every 5 seconds if connection lost
 });
 ```
 
@@ -111,19 +154,6 @@ node.setAction('heavy-compute', async (args) => {
 });
 ```
 
-### Monitoring
-Log all incoming and outgoing requests.
-
-```typescript
-const node = new Xerver({
-  name: 'monitored-node',
-  port: 3004,
-  onrequest: (event) => {
-    console.log(`[${event.timestamp}] ${event.type}: ${event.action} (ID: ${event.id})`);
-  }
-});
-```
-
 ## API Reference
 
 ### `new Xerver(config)`
@@ -133,13 +163,18 @@ const node = new Xerver({
 *   `config.requestTimeout`: Timeout in ms (default 10000).
 *   `config.maxConcurrency`: Max concurrent local jobs (default Infinity).
 *   `config.maxQueueSize`: Max pending requests in queue (default 5000).
+*   `config.connectionRetryInterval`: Reconnection interval in ms (default 5000).
 
 ### `setAction(name, handler, options)`
 Registers a function available to the mesh.
+*   `handler`: Can return a value, a Promise, or an AsyncGenerator (for streaming).
 *   `options.serializer`: `'json'` (default) or `'msgpack'`.
 
 ### `callAction(name, args)`
-Calls an action. Finds it locally or routes request through the mesh. Returns a `Promise`.
+Calls an action and returns a single result (Promise).
+
+### `callStream(name, args)`
+Calls an action and returns an AsyncGenerator for streaming results.
 
 ## License
 ISC

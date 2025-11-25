@@ -14,6 +14,7 @@ import type {
   RequestMonitorEvent,
   XerverConfig,
   XerverMessage,
+  StreamChunkPayload,
 } from './types';
 
 const uuid = hyperid();
@@ -33,6 +34,12 @@ export class Xerver {
       createdAt: number;
       actionName: string;
       peerId?: string; // Track which peer is handling this request
+      // Streaming support
+      streamController?: {
+        push: (chunk: any) => void;
+        end: () => void;
+        error: (err: any) => void;
+      };
     }
   > = new Map();
 
@@ -103,6 +110,75 @@ export class Xerver {
 
     // Remote execution
     return this.remoteCall(actionName, args);
+  }
+
+  // New: Call action and expect a stream
+  public async *callStream(actionName: string, args: any): AsyncGenerator<any> {
+    if (!this.isRunning) {
+      throw new Error('Xerver is not running');
+    }
+
+    const id = uuid();
+
+    // Create a channel for streaming data
+    const queue = new Queue<any>();
+    let signalResolve: (() => void) | null = null;
+    let signalReject: ((err: any) => void) | null = null;
+    let isEnded = false;
+    let error: any = null;
+
+    const push = (chunk: any) => {
+      queue.enqueue(chunk);
+      if (signalResolve) {
+        signalResolve();
+        signalResolve = null;
+      }
+    };
+
+    const end = () => {
+      isEnded = true;
+      if (signalResolve) {
+        signalResolve();
+        signalResolve = null;
+      }
+    };
+
+    const throwError = (err: any) => {
+      error = err;
+      isEnded = true;
+      if (signalResolve) {
+        signalResolve();
+        signalResolve = null;
+      }
+      if (signalReject) {
+        signalReject(err);
+        signalReject = null;
+      }
+    };
+
+    // Setup remote call
+    this.setupRemoteCall(id, actionName, args, {
+      push,
+      end,
+      error: throwError
+    });
+
+    // Yield chunks
+    while (true) {
+      if (queue.size > 0) {
+        yield queue.dequeue();
+        continue;
+      }
+
+      if (error) throw error;
+      if (isEnded) break;
+
+      // Wait for data
+      await new Promise<void>((resolve, reject) => {
+        signalResolve = resolve;
+        signalReject = reject;
+      });
+    }
   }
 
   private async executeLocalAction(
@@ -196,11 +272,14 @@ export class Xerver {
     // 2. Clear pending requests
     for (const [, req] of this.pendingRequests) {
       req.reject(new Error('Node stopping'));
+      // Also close streams
+      if (req.streamController) {
+        req.streamController.error(new Error('Node stopping'));
+      }
     }
     this.pendingRequests.clear();
 
     // 3. Clear queue and reject pending queued items
-    // yocto-queue is iterable in newer versions, but safe way is dequeue loop
     while (this.requestQueue.size > 0) {
       const req = this.requestQueue.dequeue();
       req?.reject(new Error('Node stopping'));
@@ -246,8 +325,12 @@ export class Xerver {
     // 1. Cleanup Pending Requests (Outgoing)
     for (const [id, req] of this.pendingRequests) {
       if (now - req.createdAt > timeout) {
+        const err = new Error(`Timeout calling action ${req.actionName}`);
         // Use original error message format to maintain compatibility
-        req.reject(new Error(`Timeout calling action ${req.actionName}`));
+        req.reject(err);
+        if (req.streamController) {
+          req.streamController.error(err);
+        }
 
         // Decrease pending requests on peer
         if (req.peerId) {
@@ -292,18 +375,11 @@ export class Xerver {
 
     const connection = new Connection(socket);
 
-    // Silence initial connection errors; we rely on 'close' to retry
     socket.on('error', () => { });
 
     socket.on('close', () => {
-      // If node is still running and reconnection is enabled
       if (this.isRunning && (this.config.connectionRetryInterval ?? 0) > 0) {
         const retryDelay = this.config.connectionRetryInterval!;
-        // Only log if we had a successful handshake or if debug is on? 
-        // For now, console.log might be too noisy if target is down for long.
-        // Let's keep it minimal or use debug level if we had one.
-        // console.log(`[${this.config.name}] Connection to ${peer.address}:${peer.port} closed. Retrying in ${retryDelay}ms...`);
-
         setTimeout(() => this.connectToPeer(peer), retryDelay);
       }
     });
@@ -319,11 +395,8 @@ export class Xerver {
       if (connection.id) {
         this.peers.delete(connection.id);
       }
-      // Cleanup resources associated with this connection if necessary
     });
-    connection.on('error', () => {
-      // Socket errors are handled by close mostly, but good to have listener
-    });
+    connection.on('error', () => { });
 
     // Send Handshake
     const handshakeMsg: XerverMessage<HandshakePayload> = {
@@ -351,6 +424,11 @@ export class Xerver {
       case 'ACTION_RESPONSE':
       case 'ERROR':
         this.handleActionResponse(msg);
+        break;
+      case 'ACTION_STREAM_CHUNK':
+      case 'ACTION_STREAM_END':
+      case 'ACTION_STREAM_ERROR':
+        this.handleStreamMessage(msg);
         break;
     }
   }
@@ -381,7 +459,6 @@ export class Xerver {
       metadata: { trace: msg.trace },
     });
 
-    // Check for cycles
     if (msg.trace.includes(this.config.name)) {
       console.warn(
         `Cycle detected for action ${actionName}, trace: ${msg.trace.join('->')}`,
@@ -393,7 +470,8 @@ export class Xerver {
     const localAction = this.actions.get(actionName);
     if (localAction) {
       try {
-        const result = await this.executeLocalAction(
+        // Execute action
+        const resultOrPromise = this.executeLocalAction(
           localAction,
           actionName,
           args,
@@ -401,26 +479,67 @@ export class Xerver {
           msg.sender,
         );
 
-        const serializer = localAction.options.serializer || 'json';
+        const result = await resultOrPromise;
 
-        let payload: any = { result };
-        if (serializer === 'msgpack') {
-          const encoded = encode(payload);
-          payload = Buffer.from(encoded).toString('base64');
+        // Check if result is an AsyncIterator (Streaming)
+        if (result && typeof result[Symbol.asyncIterator] === 'function') {
+          // Streaming Mode
+          const serializer = localAction.options.serializer || 'json';
+          let index = 0;
+          for await (const chunk of result) {
+            let payload = chunk;
+            if (serializer === 'msgpack') {
+              // Encode chunk if serializer is msgpack
+              const encoded = encode(chunk);
+              payload = Buffer.from(encoded).toString('base64');
+            }
+
+            const chunkMsg: XerverMessage<StreamChunkPayload> = {
+              type: 'ACTION_STREAM_CHUNK',
+              id: msg.id,
+              serializer: serializer,
+              sender: this.config.name,
+              trace: [...msg.trace, this.config.name],
+              payload: { chunk: payload, index: index++ }
+            };
+            connection.send(chunkMsg);
+          }
+          // End of stream
+          const endMsg: XerverMessage<any> = {
+            type: 'ACTION_STREAM_END',
+            id: msg.id,
+            serializer: serializer,
+            sender: this.config.name,
+            trace: [...msg.trace, this.config.name],
+            payload: {}
+          };
+          connection.send(endMsg);
+
+        } else {
+          // Standard Mode (Single Response)
+          const serializer = localAction.options.serializer || 'json';
+          let payload: any = { result };
+          if (serializer === 'msgpack') {
+            const encoded = encode(payload);
+            payload = Buffer.from(encoded).toString('base64');
+          }
+
+          const response: XerverMessage<any> = {
+            type: 'ACTION_RESPONSE',
+            id: msg.id,
+            serializer: serializer,
+            sender: this.config.name,
+            trace: [...msg.trace, this.config.name],
+            payload: payload,
+          };
+          connection.send(response);
         }
-
-        const response: XerverMessage<any> = {
-          type: 'ACTION_RESPONSE',
-          id: msg.id,
-          serializer: serializer,
-          sender: this.config.name,
-          trace: [...msg.trace, this.config.name],
-          payload: payload,
-        };
-        connection.send(response);
       } catch (error: any) {
+        // Send Error (works for both stream and regular)
+        // For stream, ideally we send ACTION_STREAM_ERROR if streaming started,
+        // but ERROR is fine as a generic abort
         const errorMsg: XerverMessage<ActionResponsePayload> = {
-          type: 'ERROR',
+          type: 'ERROR', // Or ACTION_STREAM_ERROR
           id: msg.id,
           serializer: 'json',
           sender: this.config.name,
@@ -433,7 +552,6 @@ export class Xerver {
     }
 
     // 2. Forwarding (Mesh)
-    // Load Balancing: Least Connection
     const candidates: Connection[] = [];
     for (const peer of this.peers.values()) {
       if (peer.remoteActions.includes(actionName)) {
@@ -443,7 +561,6 @@ export class Xerver {
 
     let targetPeer: Connection | undefined;
     if (candidates.length > 0) {
-      // Sort by pendingRequests (Ascending)
       candidates.sort((a, b) => a.pendingRequests - b.pendingRequests);
       targetPeer = candidates[0];
     }
@@ -458,42 +575,86 @@ export class Xerver {
     if (!targetPeer) {
       this.routeRequest(msg, connection);
     } else {
-      // Track forwarded request load?
-      // Note: For simple forwarding we don't typically count 'pendingRequests' on Connection
-      // because we are not the original requester waiting for response.
-      // However, if we want to load balance properly in mesh, we should probably track it.
-      // But currently pendingRequests is tied to 'this.pendingRequests' map which is for OUR requests.
-      // For now, we only load balance outgoing requests originating from here or simple forwarding.
-
-      // If we forward, we don't track response here (it goes via route table). 
-      // So we can't easily decrement count when response passes through. 
-      // True Least Connection in mesh requires gossip protocol.
-      // Current implementation: Least Connection for DIRECT neighbors.
       this.forwardRequest(msg, targetPeer, connection);
     }
   }
 
-  // Map to store where a request came from: RequestID -> IncomingConnection
-  // Optimized: Store creation time for cleanup
+  private handleStreamMessage(msg: XerverMessage) {
+    // 1. Check if we are the original requester
+    if (this.pendingRequests.has(msg.id)) {
+      const req = this.pendingRequests.get(msg.id)!;
+
+      if (req.streamController) {
+        if (msg.type === 'ACTION_STREAM_CHUNK') {
+          this.emitMonitorEvent({
+            id: msg.id,
+            type: 'stream_chunk',
+            action: req.actionName,
+            sender: msg.sender,
+            // timestamp: Date.now() -- Handled by emitMonitorEvent
+          });
+
+          let chunk = msg.payload.chunk;
+          if (msg.serializer === 'msgpack') {
+            // Decode chunk
+            try {
+              const buffer = Buffer.from(chunk, 'base64');
+              const decoded: any = decode(buffer);
+              chunk = decoded;
+            } catch (e) {
+              req.streamController.error(new Error('Failed to decode msgpack chunk'));
+              return;
+            }
+          }
+          req.streamController.push(chunk);
+        } else if (msg.type === 'ACTION_STREAM_END') {
+          req.streamController.end();
+          this.pendingRequests.delete(msg.id); // Stream finished
+          // Decrease load
+          if (req.peerId) {
+            const peer = this.peers.get(req.peerId);
+            if (peer) peer.pendingRequests = Math.max(0, peer.pendingRequests - 1);
+          }
+        } else if (msg.type === 'ACTION_STREAM_ERROR') {
+          req.streamController.error(new Error(msg.payload.error));
+          this.pendingRequests.delete(msg.id);
+          if (req.peerId) {
+            const peer = this.peers.get(req.peerId);
+            if (peer) peer.pendingRequests = Math.max(0, peer.pendingRequests - 1);
+          }
+        }
+      }
+      // If no stream controller, maybe it was a regular call that returned a stream unexpectedly?
+      // Or we just ignore.
+      return;
+    }
+
+    // 2. If not, forward back
+    const route = this.routingTable.get(msg.id);
+    if (route) {
+      route.connection.send(msg);
+      // Don't delete route on CHUNK, only on END/ERROR
+      if (msg.type === 'ACTION_STREAM_END' || msg.type === 'ACTION_STREAM_ERROR') {
+        this.routingTable.delete(msg.id);
+      }
+    }
+  }
+
   private routingTable: Map<string, { connection: Connection; createdAt: number }> = new Map();
 
   private routeRequest(
     msg: XerverMessage<ActionCallPayload>,
     incomingConnection: Connection,
   ) {
-    // Store route with timestamp
     this.routingTable.set(msg.id, {
       connection: incomingConnection,
       createdAt: Date.now()
     });
 
-    // Forward to all applicable peers
     const nextTrace = [...msg.trace, this.config.name];
 
     for (const peer of this.peers.values()) {
-      // Don't send back to sender
       if (peer === incomingConnection) continue;
-      // Don't send to nodes in trace
       if (peer.id && msg.trace.includes(peer.id)) continue;
 
       const forwardedMsg = { ...msg, trace: nextTrace };
@@ -519,12 +680,10 @@ export class Xerver {
   }
 
   private handleActionResponse(msg: XerverMessage<any>) {
-    // 1. Check if we are the original requester
     if (this.pendingRequests.has(msg.id)) {
       const req = this.pendingRequests.get(msg.id)!;
       this.pendingRequests.delete(msg.id);
 
-      // Decrease load count for the peer that handled this
       if (req.peerId) {
         const peer = this.peers.get(req.peerId);
         if (peer) {
@@ -534,10 +693,11 @@ export class Xerver {
 
       if (msg.type === 'ERROR') {
         req.reject(new Error(msg.payload.error));
+        // Also notify stream listener if any
+        if (req.streamController) req.streamController.error(new Error(msg.payload.error));
       } else {
         let result = msg.payload.result;
         if (msg.serializer === 'msgpack') {
-          // Decode payload
           try {
             const buffer = Buffer.from(msg.payload, 'base64');
             const decoded: any = decode(buffer);
@@ -552,67 +712,89 @@ export class Xerver {
       return;
     }
 
-    // 2. If not, check routing table to forward back
     const route = this.routingTable.get(msg.id);
     if (route) {
       route.connection.send(msg);
-      this.routingTable.delete(msg.id); // Request complete
+      this.routingTable.delete(msg.id);
     }
   }
 
   private remoteCall(actionName: string, args: any): Promise<any> {
     return new Promise((resolve, reject) => {
-      const id = uuid();
-
-      // Load Balancing: Least Connection
-      // 1. Find candidates
-      const candidates: Connection[] = [];
-      for (const peer of this.peers.values()) {
-        if (peer.remoteActions.includes(actionName)) {
-          candidates.push(peer);
-        }
-      }
-
-      let targetPeer: Connection | undefined;
-      if (candidates.length > 0) {
-        // 2. Sort by pendingRequests (Ascending)
-        candidates.sort((a, b) => a.pendingRequests - b.pendingRequests);
-        targetPeer = candidates[0];
-      }
-
-      this.emitMonitorEvent({
-        id: id,
-        type: 'outgoing',
-        action: actionName,
-        target: targetPeer?.id || 'mesh_search',
-      });
-
-      // Optimized: No setTimeout here. Cleanup handled by cleanupStaleRequests
-      this.pendingRequests.set(id, {
-        resolve,
-        reject,
-        createdAt: Date.now(),
-        actionName,
-        peerId: targetPeer?.id || undefined // Store peer ID for load tracking
-      });
-
-      const msg: XerverMessage<ActionCallPayload> = {
-        type: 'ACTION_CALL',
-        id,
-        serializer: 'json',
-        sender: this.config.name,
-        trace: [this.config.name],
-        payload: { action: actionName, args },
-      };
-
-      if (targetPeer) {
-        targetPeer.pendingRequests++; // Increment load
-        targetPeer.send(msg);
-      } else {
-        for (const peer of this.peers.values()) {
-          peer.send(msg);
-        }
-      }
+      // Reuse logic? Or create separate flow?
+      // Since remoteCall returns Promise<any>, it expects a single result.
+      // callStream uses setupRemoteCall with stream callbacks.
+      this.setupRemoteCall(uuid(), actionName, args, { resolve, reject });
     });
+  }
+
+  private setupRemoteCall(
+    id: string,
+    actionName: string,
+    args: any,
+    callbacks: {
+      resolve?: (val: any) => void;
+      reject?: (err: any) => void;
+      push?: (chunk: any) => void;
+      end?: () => void;
+      error?: (err: any) => void;
+    }
+  ) {
+    const candidates: Connection[] = [];
+    for (const peer of this.peers.values()) {
+      if (peer.remoteActions.includes(actionName)) {
+        candidates.push(peer);
+      }
+    }
+
+    let targetPeer: Connection | undefined;
+    if (candidates.length > 0) {
+      candidates.sort((a, b) => a.pendingRequests - b.pendingRequests);
+      targetPeer = candidates[0];
+    }
+
+    this.emitMonitorEvent({
+      id: id,
+      type: 'outgoing',
+      action: actionName,
+      target: targetPeer?.id || 'mesh_search',
+    });
+
+    // Construct stream controller if callbacks provided
+    let streamController;
+    if (callbacks.push) {
+      streamController = {
+        push: callbacks.push!,
+        end: callbacks.end!,
+        error: callbacks.error!
+      };
+    }
+
+    this.pendingRequests.set(id, {
+      resolve: callbacks.resolve || (() => { }),
+      reject: callbacks.reject || (() => { }),
+      createdAt: Date.now(),
+      actionName,
+      peerId: targetPeer?.id || undefined,
+      streamController
+    });
+
+    const msg: XerverMessage<ActionCallPayload> = {
+      type: 'ACTION_CALL',
+      id,
+      serializer: 'json',
+      sender: this.config.name,
+      trace: [this.config.name],
+      payload: { action: actionName, args },
+    };
+
+    if (targetPeer) {
+      targetPeer.pendingRequests++;
+      targetPeer.send(msg);
+    } else {
+      for (const peer of this.peers.values()) {
+        peer.send(msg);
+      }
+    }
   }
 }
