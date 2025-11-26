@@ -7,7 +7,8 @@
     "lint": "biome check .",
     "format": "biome format . --write",
     "check": "biome check . --write",
-    "biome:ci": "biome ci"
+    "biome:ci": "biome ci",
+    "test:leak": "node --require ./tests/setup.js tests/memory_leak.ts"
   },
   "keywords": [],
   "author": "denyzhirkov@gmail.com",
