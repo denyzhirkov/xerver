@@ -1,8 +1,14 @@
 {
   "name": "xerver",
   "version": "1.4.0",
-  "main": "index.js",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
   "scripts": {
+    "build": "tsc",
+    "prepublishOnly": "npm run build",
     "test": "node --require ./tests/setup.js --test tests/cases/*.test.ts",
     "lint": "biome check .",
     "format": "biome format . --write",
