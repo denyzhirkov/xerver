@@ -6,6 +6,7 @@ export interface XerverConfig {
   maxConcurrency?: number; // New configuration option
   maxQueueSize?: number; // Limit the size of the request queue
   connectionRetryInterval?: number; // Time in ms to wait before reconnecting to a peer. Default: 5000
+  streamBatching?: boolean; // Enable TCP batching for streaming (better for large payloads). Default: false
   onrequest?: RequestMonitorCallback;
 }
 
@@ -61,7 +62,7 @@ export interface ActionResponsePayload {
 
 export interface StreamChunkPayload {
   chunk: any;
-  index: number; // To order chunks if needed, though TCP is ordered
+  index?: number; // Optional: TCP guarantees order
 }
 
 export interface RequestMonitorEvent {

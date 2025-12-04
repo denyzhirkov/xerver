@@ -46,6 +46,40 @@ export class Connection extends EventEmitter {
     this.socket.write(data);
   }
 
+  /**
+   * Cork the socket - buffer writes until uncork()
+   * Useful for batching multiple messages into one TCP packet
+   */
+  public cork() {
+    this.socket.cork();
+  }
+
+  /**
+   * Uncork the socket - flush buffered writes
+   */
+  public uncork() {
+    this.socket.uncork();
+  }
+
+  /**
+   * Send multiple messages in a single TCP packet
+   */
+  public sendBatch(messages: XerverMessage[]) {
+    if (messages.length === 0) return;
+    if (messages.length === 1) {
+      this.send(messages[0]);
+      return;
+    }
+    
+    this.socket.cork();
+    for (const msg of messages) {
+      const data = Protocol.encode(msg);
+      this.socket.write(data);
+    }
+    // Use setImmediate to uncork on next tick, allowing more writes to batch
+    setImmediate(() => this.socket.uncork());
+  }
+
   public close() {
     this.socket.end();
   }

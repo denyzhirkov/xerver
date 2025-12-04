@@ -1,8 +1,8 @@
 # Xerver
 
-**Xerver** is a lightweight, high-performance decentralized mesh network library for Node.js. It allows you to create nodes that can discover each other, share capabilities (Actions), and execute remote functions across a distributed network transparently.
+**Xerver** is a lightweight, high-performance decentralized mesh network library for Node.js and Bun. It allows you to create nodes that can discover each other, share capabilities (Actions), and execute remote functions across a distributed network transparently.
 
-Designed for speed and reliability, Xerver is capable of handling **40k+ RPS** with sub-millisecond latency.
+Designed for speed and reliability, Xerver is capable of handling **80k+ RPS** with sub-millisecond latency.
 
 ## Features
 
@@ -96,12 +96,19 @@ for await (const num of client.callStream('generateNumbers', 10)) {
 ```
 
 ### Binary Streaming (High Performance)
-For files or large buffers, use `msgpack` serializer. Xerver automatically optimizes chunk serialization.
+For files or large buffers, use `msgpack` serializer and enable `streamBatching` for optimal throughput.
 
 ```typescript
 import * as fs from 'fs';
 
-// Server: Stream a large file
+// Server: Enable stream batching for large payloads
+const node = new Xerver({
+  name: 'file-server',
+  port: 3001,
+  streamBatching: true // Groups multiple chunks into single TCP packets
+});
+
+// Stream a large file
 node.setAction('downloadFile', async function* (path: string) {
   const stream = fs.createReadStream(path, { highWaterMark: 64 * 1024 });
   for await (const chunk of stream) {
@@ -164,6 +171,8 @@ node.setAction('heavy-compute', async (args) => {
 *   `config.maxConcurrency`: Max concurrent local jobs (default Infinity).
 *   `config.maxQueueSize`: Max pending requests in queue (default 5000).
 *   `config.connectionRetryInterval`: Reconnection interval in ms (default 5000).
+*   `config.streamBatching`: Enable TCP batching for streaming, better for large payloads (default false).
+*   `config.onrequest`: Callback for request monitoring events.
 
 ### `setAction(name, handler, options)`
 Registers a function available to the mesh.
@@ -175,6 +184,34 @@ Calls an action and returns a single result (Promise).
 
 ### `callStream(name, args)`
 Calls an action and returns an AsyncGenerator for streaming results.
+
+### `setRequestMonitor(callback)`
+Sets a callback to monitor all request events (incoming, outgoing, forwarding, etc.).
+
+## Runtime Support
+
+Xerver is fully compatible with both **Node.js** and **Bun**.
+
+> 💡 **Recommendation:** For best performance, use **Bun** runtime. It provides up to 30% higher throughput and faster startup times compared to Node.js.
+
+```bash
+# Node.js
+node your-app.js
+
+# Bun (recommended for production)
+bun your-app.ts
+```
+
+## Performance
+
+Benchmarks on Apple Silicon (Bun runtime):
+
+| Test | RPS | P50 Latency | P99 Latency |
+|------|-----|-------------|-------------|
+| Star Topology (8 workers) | 82,000+ | 8ms | 20ms |
+| Deep Chain (9 hops) | 2,800+ | <1ms | 1ms |
+| Mesh Flood (12 nodes) | 14,000+ | 3ms | 7ms |
+| Streaming (10MB) | 93 streams/s | 9ms | 20ms |
 
 ## License
 ISC

@@ -61,6 +61,7 @@ export class Xerver {
       maxConcurrency: Infinity, // Default: unbounded
       maxQueueSize: 5000, // Default queue limit
       connectionRetryInterval: 5000, // Default: 5s
+      streamBatching: false, // Default: disabled (enable for large payloads)
       ...config,
     };
     this.requestMonitor = config.onrequest;
@@ -122,37 +123,55 @@ export class Xerver {
 
     // Create a channel for streaming data
     const queue = new Queue<any>();
-    let signalResolve: (() => void) | null = null;
-    let signalReject: ((err: any) => void) | null = null;
     let isEnded = false;
     let error: any = null;
+    
+    // Optimization: Reusable deferred promise pattern
+    let pendingResolve: (() => void) | null = null;
+    let pendingReject: ((err: any) => void) | null = null;
+    let pendingPromise: Promise<void> | null = null;
+    
+    const getWaitPromise = (): Promise<void> => {
+      if (!pendingPromise) {
+        pendingPromise = new Promise<void>((resolve, reject) => {
+          pendingResolve = resolve;
+          pendingReject = reject;
+        });
+      }
+      return pendingPromise;
+    };
+    
+    const signal = () => {
+      if (pendingResolve) {
+        const resolve = pendingResolve;
+        pendingResolve = null;
+        pendingReject = null;
+        pendingPromise = null;
+        resolve();
+      }
+    };
 
     const push = (chunk: any) => {
       queue.enqueue(chunk);
-      if (signalResolve) {
-        signalResolve();
-        signalResolve = null;
-      }
+      signal();
     };
 
     const end = () => {
       isEnded = true;
-      if (signalResolve) {
-        signalResolve();
-        signalResolve = null;
-      }
+      signal();
     };
 
     const throwError = (err: any) => {
       error = err;
       isEnded = true;
-      if (signalResolve) {
-        signalResolve();
-        signalResolve = null;
-      }
-      if (signalReject) {
-        signalReject(err);
-        signalReject = null;
+      if (pendingReject) {
+        const reject = pendingReject;
+        pendingResolve = null;
+        pendingReject = null;
+        pendingPromise = null;
+        reject(err);
+      } else {
+        signal();
       }
     };
 
@@ -163,21 +182,18 @@ export class Xerver {
       error: throwError
     });
 
-    // Yield chunks
+    // Yield chunks - optimized loop
     while (true) {
-      if (queue.size > 0) {
+      // Drain all available chunks before waiting
+      while (queue.size > 0) {
         yield queue.dequeue();
-        continue;
       }
 
       if (error) throw error;
       if (isEnded) break;
 
-      // Wait for data
-      await new Promise<void>((resolve, reject) => {
-        signalResolve = resolve;
-        signalReject = reject;
-      });
+      // Wait for more data (reuses promise if possible)
+      await getWaitPromise();
     }
   }
 
@@ -485,7 +501,16 @@ export class Xerver {
         if (result && typeof result[Symbol.asyncIterator] === 'function') {
           // Streaming Mode
           const serializer = localAction.options.serializer || 'json';
-          let index = 0;
+          // Optimization: Cache trace array once instead of creating for each chunk
+          const streamTrace = [...msg.trace, this.config.name];
+          
+          // Optional: Batch chunks using TCP cork (better for large payloads)
+          const useBatching = this.config.streamBatching;
+          const BATCH_SIZE = 16; // Flush every N chunks
+          let chunkCount = 0;
+          
+          if (useBatching) connection.cork();
+          
           for await (const chunk of result) {
             let payload = chunk;
             if (serializer === 'msgpack') {
@@ -499,21 +524,29 @@ export class Xerver {
               id: msg.id,
               serializer: serializer,
               sender: this.config.name,
-              trace: [...msg.trace, this.config.name],
-              payload: { chunk: payload, index: index++ }
+              trace: streamTrace,
+              payload: { chunk: payload }
             };
             connection.send(chunkMsg);
+            
+            // Periodic flush to prevent buffering too much
+            if (useBatching && ++chunkCount % BATCH_SIZE === 0) {
+              connection.uncork();
+              connection.cork();
+            }
           }
+          
           // End of stream
           const endMsg: XerverMessage<any> = {
             type: 'ACTION_STREAM_END',
             id: msg.id,
             serializer: serializer,
             sender: this.config.name,
-            trace: [...msg.trace, this.config.name],
+            trace: streamTrace,
             payload: {}
           };
           connection.send(endMsg);
+          if (useBatching) connection.uncork(); // Final flush
 
         } else {
           // Standard Mode (Single Response)
