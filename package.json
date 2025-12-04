@@ -14,7 +14,10 @@
     "format": "biome format . --write",
     "check": "biome check . --write",
     "biome:ci": "biome ci",
-    "test:leak": "node --require ./tests/setup.js tests/memory_leak.ts"
+    "test:leak": "node --require ./tests/setup.js tests/memory_leak.ts",
+    "test:bun": "bun test tests-bun/cases/",
+    "test:bun:leak": "bun tests-bun/memory_leak.ts",
+    "test:bun:bench": "bun tests-bun/benchmark.ts"
   },
   "keywords": [],
   "author": "denyzhirkov@gmail.com",

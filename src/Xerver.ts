@@ -554,7 +554,9 @@ export class Xerver {
     // 2. Forwarding (Mesh)
     const candidates: Connection[] = [];
     for (const peer of this.peers.values()) {
-      if (peer.remoteActions.includes(actionName)) {
+      // Exclude peers already in trace to prevent cycles
+      if (peer.remoteActions.includes(actionName) && 
+          peer.id && !msg.trace.includes(peer.id)) {
         candidates.push(peer);
       }
     }
