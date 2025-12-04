@@ -1,6 +1,5 @@
-
-import { Xerver } from '../src/Xerver';
 import * as crypto from 'node:crypto';
+import { Xerver } from '../src/Xerver';
 
 // Memory Leak Test with "Star of Stars" Topology (9 nodes)
 // Topology:
@@ -45,7 +44,7 @@ async function run() {
       name: midName,
       port: midPort,
       nodes: [{ address: 'localhost', port: PORT_BASE }], // Connect to Center
-      connectionRetryInterval: 1000
+      connectionRetryInterval: 1000,
     });
 
     // Leaf Node (connects to Middle)
@@ -53,7 +52,7 @@ async function run() {
       name: leafName,
       port: leafPort,
       nodes: [{ address: 'localhost', port: midPort }], // Connect to Mid
-      connectionRetryInterval: 1000
+      connectionRetryInterval: 1000,
     });
 
     // Register various actions on Leaf nodes
@@ -81,7 +80,7 @@ async function run() {
 
   console.log('All nodes started. Topology built.');
   console.log('Waiting for mesh propagation...');
-  await new Promise(r => setTimeout(r, 2000));
+  await new Promise((r) => setTimeout(r, 2000));
 
   // 3. Start Infinite Traffic
   // Each leaf calls actions on OTHER leaves randomly
@@ -89,16 +88,23 @@ async function run() {
   let totalRequests = 0;
   const reportInterval = setInterval(() => {
     const used = process.memoryUsage();
-    console.log(`[${new Date().toISOString()}] Requests: ${totalRequests} | RSS: ${(used.rss / 1024 / 1024).toFixed(2)} MB | Heap: ${(used.heapUsed / 1024 / 1024).toFixed(2)} MB`);
+    console.log(
+      `[${new Date().toISOString()}] Requests: ${totalRequests} | RSS: ${(used.rss / 1024 / 1024).toFixed(2)} MB | Heap: ${(used.heapUsed / 1024 / 1024).toFixed(2)} MB`,
+    );
   }, 5000);
 
   const runTraffic = async (sourceNode: Xerver) => {
     while (true) {
       try {
-        const action = ['echo', 'heavy', 'stream'][Math.floor(Math.random() * 3)];
+        const action = ['echo', 'heavy', 'stream'][
+          Math.floor(Math.random() * 3)
+        ];
 
         if (action === 'echo') {
-          await sourceNode.callAction('echo', { from: sourceNode.config.name, ts: Date.now() });
+          await sourceNode.callAction('echo', {
+            from: sourceNode.config.name,
+            ts: Date.now(),
+          });
         } else if (action === 'heavy') {
           await sourceNode.callAction('heavy', null);
         } else if (action === 'stream') {
@@ -111,20 +117,19 @@ async function run() {
         totalRequests++;
 
         // Small delay to prevent total CPU saturation, we want to test memory over time
-        await new Promise(r => setTimeout(r, 10));
-
+        await new Promise((r) => setTimeout(r, 10));
       } catch (e: any) {
         // Ignore timeouts/errors during mesh re-balancing, just log
         if (!e.message.includes('Timeout')) {
           console.error(`Error in ${sourceNode.config.name}:`, e.message);
         }
-        await new Promise(r => setTimeout(r, 1000));
+        await new Promise((r) => setTimeout(r, 1000));
       }
     }
   };
 
   // Start a traffic loop for EACH leaf node
-  leafNodes.forEach(leaf => runTraffic(leaf));
+  leafNodes.forEach((leaf) => runTraffic(leaf));
 
   // Keep process alive
   process.on('SIGINT', async () => {
@@ -137,5 +142,4 @@ async function run() {
   });
 }
 
-run().catch(err => console.error(err));
-
+run().catch((err) => console.error(err));

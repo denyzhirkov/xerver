@@ -1,4 +1,4 @@
-import { describe, it, beforeAll, afterAll, expect } from 'bun:test';
+import { afterAll, beforeAll, describe, expect, it } from 'bun:test';
 import { Xerver } from '../../src/Xerver';
 
 describe('Xerver Integration Tests', () => {
@@ -57,8 +57,13 @@ describe('Xerver Integration Tests', () => {
     expect(result).toBe(5);
   });
 
-  it('should fail when action does not exist', async () => {
-    expect(nodeD.callAction('non_existent_action', [])).rejects.toThrow(/Timeout calling action/);
-  }, { timeout: 15000 }); // Xerver default requestTimeout is 10s
+  it(
+    'should fail when action does not exist',
+    async () => {
+      expect(nodeD.callAction('non_existent_action', [])).rejects.toThrow(
+        /Timeout calling action/,
+      );
+    },
+    { timeout: 15000 },
+  ); // Xerver default requestTimeout is 10s
 });
-

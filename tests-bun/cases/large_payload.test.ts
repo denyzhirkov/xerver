@@ -1,4 +1,4 @@
-import { describe, it, beforeAll, afterAll, expect } from 'bun:test';
+import { afterAll, beforeAll, describe, expect, it } from 'bun:test';
 import { Xerver } from '../../src/Xerver';
 
 describe('Xerver Large Payload Tests', () => {
@@ -80,7 +80,7 @@ describe('Xerver Large Payload Tests', () => {
 
     // Check if result.data is valid
     expect(result.data).toBeTruthy();
-    
+
     // Verify size roughly (serialization adds overhead)
     if (result.data.type === 'Buffer') {
       expect(result.data.data.length).toBe(10 * 1024 * 1024);
@@ -89,4 +89,3 @@ describe('Xerver Large Payload Tests', () => {
     }
   });
 });
-

@@ -1,4 +1,4 @@
-import { describe, it, beforeAll, afterAll, expect } from 'bun:test';
+import { afterAll, beforeAll, describe, expect, it } from 'bun:test';
 import type { RequestMonitorEvent } from '../../src/types';
 import { Xerver } from '../../src/Xerver';
 
@@ -38,8 +38,12 @@ describe('Xerver Request Monitoring Tests', () => {
     eventsA.length = 0; // Clear previous events
     await nodeA.callAction('echo', 'test');
 
-    expect(eventsA.some((e) => e.type === 'outgoing' && e.action === 'echo')).toBe(true);
-    expect(eventsA.some((e) => e.type === 'local_execution' && e.action === 'echo')).toBe(true);
+    expect(
+      eventsA.some((e) => e.type === 'outgoing' && e.action === 'echo'),
+    ).toBe(true);
+    expect(
+      eventsA.some((e) => e.type === 'local_execution' && e.action === 'echo'),
+    ).toBe(true);
   });
 
   it('should emit monitoring events for remote calls', async () => {
@@ -49,11 +53,16 @@ describe('Xerver Request Monitoring Tests', () => {
     await nodeB.callAction('echo', 'remote');
 
     // Node B (Caller)
-    expect(eventsB.some((e) => e.type === 'outgoing' && e.action === 'echo')).toBe(true);
+    expect(
+      eventsB.some((e) => e.type === 'outgoing' && e.action === 'echo'),
+    ).toBe(true);
 
     // Node A (Receiver)
-    expect(eventsA.some((e) => e.type === 'incoming' && e.action === 'echo')).toBe(true);
-    expect(eventsA.some((e) => e.type === 'local_execution' && e.action === 'echo')).toBe(true);
+    expect(
+      eventsA.some((e) => e.type === 'incoming' && e.action === 'echo'),
+    ).toBe(true);
+    expect(
+      eventsA.some((e) => e.type === 'local_execution' && e.action === 'echo'),
+    ).toBe(true);
   });
 });
-

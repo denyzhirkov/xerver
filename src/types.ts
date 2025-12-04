@@ -15,7 +15,9 @@ export interface PeerAddress {
   port: number;
 }
 
-export type ActionHandler = (args: any) => Promise<any> | AsyncIterable<any> | any;
+export type ActionHandler = (
+  args: any,
+) => Promise<any> | AsyncIterable<any> | any;
 
 export interface ActionOptions {
   serializer?: 'json' | 'msgpack';
@@ -31,7 +33,7 @@ export type MessageType =
   | 'ACTION_CALL'
   | 'ACTION_RESPONSE'
   | 'ACTION_STREAM_CHUNK' // New
-  | 'ACTION_STREAM_END'   // New
+  | 'ACTION_STREAM_END' // New
   | 'ACTION_STREAM_ERROR' // New
   | 'ERROR';
 export type SerializerType = 'json' | 'msgpack';
@@ -67,7 +69,13 @@ export interface StreamChunkPayload {
 
 export interface RequestMonitorEvent {
   id: string;
-  type: 'incoming' | 'outgoing' | 'forwarding' | 'local_execution' | 'queued' | 'stream_chunk'; // Added 'stream_chunk'
+  type:
+    | 'incoming'
+    | 'outgoing'
+    | 'forwarding'
+    | 'local_execution'
+    | 'queued'
+    | 'stream_chunk'; // Added 'stream_chunk'
   action: string;
   sender?: string;
   target?: string;

@@ -1,4 +1,4 @@
-import { describe, it, beforeAll, afterAll, expect } from 'bun:test';
+import { afterAll, beforeAll, describe, expect, it } from 'bun:test';
 import { Xerver } from '../../src/Xerver';
 
 describe('Xerver Serialization Tests', () => {
@@ -44,4 +44,3 @@ describe('Xerver Serialization Tests', () => {
     expect(result).toEqual(input);
   });
 });
-

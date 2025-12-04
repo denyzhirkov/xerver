@@ -1,6 +1,6 @@
-import { describe, it, beforeAll, afterAll, expect } from 'bun:test';
-import { Xerver } from '../../src/Xerver';
+import { afterAll, beforeAll, describe, expect, it } from 'bun:test';
 import * as crypto from 'node:crypto';
+import { Xerver } from '../../src/Xerver';
 
 // Helper: Wait for connections
 const waitForConnection = (node: Xerver, peerName: string) => {
@@ -111,7 +111,7 @@ describe('Xerver Streaming Tests', () => {
       relay = new Xerver({
         name: 'mesh-relay',
         port: 13006,
-        nodes: [{ address: 'localhost', port: 13005 }]
+        nodes: [{ address: 'localhost', port: 13005 }],
       });
       client = new Xerver({
         name: 'mesh-client',
@@ -130,7 +130,7 @@ describe('Xerver Streaming Tests', () => {
       await waitForConnection(client, 'mesh-relay');
 
       // Wait for handshake propagation
-      await new Promise(r => setTimeout(r, 500));
+      await new Promise((r) => setTimeout(r, 500));
     });
 
     afterAll(async () => {
@@ -163,17 +163,21 @@ describe('Xerver Streaming Tests', () => {
       });
 
       // A stream that generates 'size' bytes in chunks
-      server.setAction('binaryStream', async function* (size: number) {
-        const chunkSize = 64 * 1024; // 64KB chunks
-        let sent = 0;
-        while (sent < size) {
-          const remaining = size - sent;
-          const currentChunkSize = Math.min(chunkSize, remaining);
-          const buffer = crypto.randomBytes(currentChunkSize);
-          yield buffer;
-          sent += currentChunkSize;
-        }
-      }, { serializer: 'msgpack' }); // Ensure msgpack is used for binary
+      server.setAction(
+        'binaryStream',
+        async function* (size: number) {
+          const chunkSize = 64 * 1024; // 64KB chunks
+          let sent = 0;
+          while (sent < size) {
+            const remaining = size - sent;
+            const currentChunkSize = Math.min(chunkSize, remaining);
+            const buffer = crypto.randomBytes(currentChunkSize);
+            yield buffer;
+            sent += currentChunkSize;
+          }
+        },
+        { serializer: 'msgpack' },
+      ); // Ensure msgpack is used for binary
 
       await Promise.all([server.start(), client.start()]);
       await waitForConnection(client, 'binary-server');
@@ -193,7 +197,11 @@ describe('Xerver Streaming Tests', () => {
       for await (const chunk of client.callStream('binaryStream', size)) {
         if (Buffer.isBuffer(chunk)) {
           receivedBytes += chunk.length;
-        } else if (chunk && chunk.type === 'Buffer' && Array.isArray(chunk.data)) {
+        } else if (
+          chunk &&
+          chunk.type === 'Buffer' &&
+          Array.isArray(chunk.data)
+        ) {
           receivedBytes += chunk.data.length;
         } else {
           receivedBytes += chunk.length || 0;
@@ -214,7 +222,11 @@ describe('Xerver Streaming Tests', () => {
       for await (const chunk of client.callStream('binaryStream', size)) {
         if (Buffer.isBuffer(chunk)) {
           receivedBytes += chunk.length;
-        } else if (chunk && chunk.type === 'Buffer' && Array.isArray(chunk.data)) {
+        } else if (
+          chunk &&
+          chunk.type === 'Buffer' &&
+          Array.isArray(chunk.data)
+        ) {
           receivedBytes += chunk.data.length;
         } else {
           receivedBytes += chunk.length || 0;
@@ -235,7 +247,11 @@ describe('Xerver Streaming Tests', () => {
       for await (const chunk of client.callStream('binaryStream', size)) {
         if (Buffer.isBuffer(chunk)) {
           receivedBytes += chunk.length;
-        } else if (chunk && chunk.type === 'Buffer' && Array.isArray(chunk.data)) {
+        } else if (
+          chunk &&
+          chunk.type === 'Buffer' &&
+          Array.isArray(chunk.data)
+        ) {
           receivedBytes += chunk.data.length;
         } else {
           receivedBytes += chunk.length || 0;
@@ -248,4 +264,3 @@ describe('Xerver Streaming Tests', () => {
     });
   });
 });
-

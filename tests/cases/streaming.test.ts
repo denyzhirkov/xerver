@@ -1,8 +1,7 @@
-
 import assert from 'node:assert';
+import * as crypto from 'node:crypto';
 import { test } from 'node:test';
 import { Xerver } from '../../src/Xerver';
-import * as crypto from 'node:crypto';
 
 test('Xerver Streaming Tests', async (t) => {
   // --- Helper: Wait for connections ---
@@ -85,44 +84,47 @@ test('Xerver Streaming Tests', async (t) => {
     await server.stop();
   });
 
-  await t.test('Should stream through a relay node (Mesh Streaming)', async () => {
-    const server = new Xerver({ name: 'mesh-server', port: 13005 });
-    const relay = new Xerver({
-      name: 'mesh-relay',
-      port: 13006,
-      nodes: [{ address: 'localhost', port: 13005 }]
-    });
-    const client = new Xerver({
-      name: 'mesh-client',
-      port: 13007,
-      nodes: [{ address: 'localhost', port: 13006 }],
-    });
+  await t.test(
+    'Should stream through a relay node (Mesh Streaming)',
+    async () => {
+      const server = new Xerver({ name: 'mesh-server', port: 13005 });
+      const relay = new Xerver({
+        name: 'mesh-relay',
+        port: 13006,
+        nodes: [{ address: 'localhost', port: 13005 }],
+      });
+      const client = new Xerver({
+        name: 'mesh-client',
+        port: 13007,
+        nodes: [{ address: 'localhost', port: 13006 }],
+      });
 
-    server.setAction('meshStream', async function* () {
-      yield 'hop1';
-      yield 'hop2';
-      yield 'hop3';
-    });
+      server.setAction('meshStream', async function* () {
+        yield 'hop1';
+        yield 'hop2';
+        yield 'hop3';
+      });
 
-    await Promise.all([server.start(), relay.start(), client.start()]);
-    await waitForConnection(relay, 'mesh-server');
-    await waitForConnection(client, 'mesh-relay');
+      await Promise.all([server.start(), relay.start(), client.start()]);
+      await waitForConnection(relay, 'mesh-server');
+      await waitForConnection(client, 'mesh-relay');
 
-    // Wait for handshake propagation
-    await new Promise(r => setTimeout(r, 500));
+      // Wait for handshake propagation
+      await new Promise((r) => setTimeout(r, 500));
 
-    const received: string[] = [];
-    for await (const chunk of client.callStream('meshStream', null)) {
-      received.push(chunk);
-    }
+      const received: string[] = [];
+      for await (const chunk of client.callStream('meshStream', null)) {
+        received.push(chunk);
+      }
 
-    assert.deepStrictEqual(received, ['hop1', 'hop2', 'hop3']);
-    console.log('Mesh streaming passed');
+      assert.deepStrictEqual(received, ['hop1', 'hop2', 'hop3']);
+      console.log('Mesh streaming passed');
 
-    await client.stop();
-    await relay.stop();
-    await server.stop();
-  });
+      await client.stop();
+      await relay.stop();
+      await server.stop();
+    },
+  );
 
   await t.test('Should stream large binary data (1MB, 5MB, 10MB)', async () => {
     const server = new Xerver({ name: 'binary-server', port: 13008 });
@@ -133,25 +135,29 @@ test('Xerver Streaming Tests', async (t) => {
     });
 
     // A stream that generates 'size' bytes in chunks
-    server.setAction('binaryStream', async function* (size: number) {
-      const chunkSize = 64 * 1024; // 64KB chunks
-      let sent = 0;
-      while (sent < size) {
-        const remaining = size - sent;
-        const currentChunkSize = Math.min(chunkSize, remaining);
-        const buffer = crypto.randomBytes(currentChunkSize);
-        yield buffer;
-        sent += currentChunkSize;
-      }
-    }, { serializer: 'msgpack' }); // Ensure msgpack is used for binary
+    server.setAction(
+      'binaryStream',
+      async function* (size: number) {
+        const chunkSize = 64 * 1024; // 64KB chunks
+        let sent = 0;
+        while (sent < size) {
+          const remaining = size - sent;
+          const currentChunkSize = Math.min(chunkSize, remaining);
+          const buffer = crypto.randomBytes(currentChunkSize);
+          yield buffer;
+          sent += currentChunkSize;
+        }
+      },
+      { serializer: 'msgpack' },
+    ); // Ensure msgpack is used for binary
 
     await Promise.all([server.start(), client.start()]);
     await waitForConnection(client, 'binary-server');
 
     const sizes = [
-      1 * 1024 * 1024,  // 1MB
-      5 * 1024 * 1024,  // 5MB
-      10 * 1024 * 1024  // 10MB
+      1 * 1024 * 1024, // 1MB
+      5 * 1024 * 1024, // 5MB
+      10 * 1024 * 1024, // 10MB
     ];
 
     for (const size of sizes) {
@@ -163,23 +169,27 @@ test('Xerver Streaming Tests', async (t) => {
         // chunk comes as Buffer if msgpack handles it, or object structure from msgpack
         // In our implementation, raw buffer might be base64 encoded if using JSON fallback,
         // but we set 'msgpack' option.
-        // Note: Xerver's stream implementation currently defaults to 'json' serializer for chunks 
+        // Note: Xerver's stream implementation currently defaults to 'json' serializer for chunks
         // inside 'handleActionCall' -> 'ACTION_STREAM_CHUNK'.
         // Let's see if we need to adjust Xerver.ts to respect action serializer for chunks too.
         // Wait! In Xerver.ts: "serializer: 'json', // Default to json for chunks for now"
         // This means binary buffers will likely be serialized as JSON arrays or strings if not handled.
         // Msgpack library handles Buffers efficiently.
-        // However, since the CHUNK message header is hardcoded to 'json' in Xerver.ts, 
+        // However, since the CHUNK message header is hardcoded to 'json' in Xerver.ts,
         // we need to fix Xerver.ts to use the action's serializer for chunks!
         // But for this test, let's assume we fix it or it works enough to verify volume.
 
-        // If the current implementation hardcodes 'json' for chunks, buffers will be converted to 
+        // If the current implementation hardcodes 'json' for chunks, buffers will be converted to
         // objects like { type: 'Buffer', data: [...] } by JSON.stringify in Node.js.
         // We will count 'chunk.data.length' or 'chunk.length'.
 
         if (Buffer.isBuffer(chunk)) {
           receivedBytes += chunk.length;
-        } else if (chunk && chunk.type === 'Buffer' && Array.isArray(chunk.data)) {
+        } else if (
+          chunk &&
+          chunk.type === 'Buffer' &&
+          Array.isArray(chunk.data)
+        ) {
           receivedBytes += chunk.data.length;
         } else {
           // Fallback for string/other
@@ -189,7 +199,11 @@ test('Xerver Streaming Tests', async (t) => {
 
       const duration = Date.now() - start;
       console.log(`Streamed ${size / 1024 / 1024}MB in ${duration}ms`);
-      assert.strictEqual(receivedBytes, size, `Should receive exactly ${size} bytes`);
+      assert.strictEqual(
+        receivedBytes,
+        size,
+        `Should receive exactly ${size} bytes`,
+      );
     }
 
     await client.stop();

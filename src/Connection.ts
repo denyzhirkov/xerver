@@ -70,7 +70,7 @@ export class Connection extends EventEmitter {
       this.send(messages[0]);
       return;
     }
-    
+
     this.socket.cork();
     for (const msg of messages) {
       const data = Protocol.encode(msg);

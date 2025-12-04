@@ -1,4 +1,3 @@
-
 import assert from 'node:assert';
 import { test } from 'node:test';
 import { Xerver } from '../../src/Xerver';
@@ -111,4 +110,3 @@ test('Xerver Load Tests', async (t) => {
     await server.stop();
   });
 });
-

@@ -1,4 +1,4 @@
-import { describe, it, beforeAll, afterAll, expect } from 'bun:test';
+import { afterAll, beforeAll, describe, expect, it } from 'bun:test';
 import { Xerver } from '../../src/Xerver';
 
 describe('Xerver Circular & Nested Calls Tests', () => {
@@ -60,4 +60,3 @@ describe('Xerver Circular & Nested Calls Tests', () => {
     expect(result).toBe(420); // 10 * 42
   });
 });
-

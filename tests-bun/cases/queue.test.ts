@@ -1,4 +1,4 @@
-import { describe, it, beforeAll, afterAll, expect } from 'bun:test';
+import { afterAll, beforeAll, describe, expect, it } from 'bun:test';
 import { Xerver } from '../../src/Xerver';
 
 describe('Xerver Concurrency & Queue Tests', () => {
@@ -59,4 +59,3 @@ describe('Xerver Concurrency & Queue Tests', () => {
     }
   });
 });
-

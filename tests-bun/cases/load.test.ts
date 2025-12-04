@@ -1,4 +1,4 @@
-import { describe, it, beforeAll, afterAll, expect } from 'bun:test';
+import { afterAll, beforeAll, describe, expect, it } from 'bun:test';
 import { Xerver } from '../../src/Xerver';
 
 // Helper: Wait for connections
@@ -127,4 +127,3 @@ describe('Xerver Load Tests', () => {
     });
   });
 });
-
